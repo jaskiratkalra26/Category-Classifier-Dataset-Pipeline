@@ -7,6 +7,48 @@ from frame_sampler import sample_frames
 from clip_embedder import ClipEmbedder
 from PIL import Image
 
+def process_single_video(video_id, category, embedder):
+    """
+    Processes a single video: extracting frames, generating embedding, returning dict.
+    Returns None if failed.
+    """
+    # Find video
+    video_path = None
+    category_dir = os.path.join(config.VIDEOS_DIR, category)
+    if os.path.exists(category_dir):
+        # Check by ID
+        for f in os.listdir(category_dir):
+            if f.startswith(video_id + "."):
+                video_path = os.path.join(category_dir, f)
+                break
+    
+    if not video_path:
+        return None
+
+    try:
+        frames = sample_frames(video_path, num_frames=config.FRAME_SAMPLE_COUNT)
+        if not frames:
+            return None
+            
+        embedding = embedder.get_embedding(frames)
+        
+        if embedding is not None:
+            # Create result dictionary
+            res = {
+                "video_id": video_id,
+                "category": category
+            }
+            # Add embedding fields
+            for i, val in enumerate(embedding):
+                res[f"embedding_{i}"] = val
+            return res
+
+    except Exception as e:
+        print(f"Error processing {video_id}: {e}")
+        return None
+    
+    return None
+
 def build_dataset(metadata_file=config.METADATA_FILE, output_file=config.OUTPUT_DATASET_FILE):
     if not os.path.exists(metadata_file):
         print(f"Metadata file {metadata_file} not found.")
@@ -42,61 +84,17 @@ def build_dataset(metadata_file=config.METADATA_FILE, output_file=config.OUTPUT_
     embedder = ClipEmbedder()
 
     # Iterate and process
-    # We will buffer results and write in chunks to avoid memory issues and data loss
     results = []
-    CHUNK_SIZE = 100
+    CHUNK_SIZE = 50 
 
     pbar = tqdm.tqdm(total=len(videos_to_process), unit="video")
     
     for index, row in videos_to_process.iterrows():
-        video_id = row['video_id']
-        category = row['category']
+        res = process_single_video(row['video_id'], row['category'], embedder)
         
-        # Construct video path
-        video_path = os.path.join(config.VIDEOS_DIR, category, f"{video_id}.mp4")
-        
-        if not os.path.exists(video_path):
-            # Try checking without extension or other extensions if strict path fails
-            # But downloader forced mp4, so let's stick to that or Log warning
-            # Actually, sometimes yt-dlp merges into mkv if mp4 merge fails. 
-            # Let's check a few extensions.
-            found = False
-            for ext in ['.mp4', '.mkv', '.webm']:
-                 temp_path = os.path.join(config.VIDEOS_DIR, category, f"{video_id}{ext}")
-                 if os.path.exists(temp_path):
-                     video_path = temp_path
-                     found = True
-                     break
-            
-            if not found:
-                pbar.write(f"Video file not found for ID {video_id} in {category}. Skipping.")
-                pbar.update(1)
-                continue
-
-        try:
-            frames = sample_frames(video_path, num_frames=config.FRAME_SAMPLE_COUNT)
-            if not frames:
-                pbar.write(f"No frames extracted for {video_id}. Skipping.")
-                pbar.update(1)
-                continue
-                
-            embedding = embedder.get_embedding(frames)
-            
-            if embedding is not None:
-                # Create result dictionary
-                # Flatten embedding to columns embedding_0, embedding_1...
-                res = {
-                    "video_id": video_id,
-                    "category": category
-                }
-                for i, val in enumerate(embedding):
-                    res[f"embedding_{i}"] = val
-                
-                results.append(res)
-
-        except Exception as e:
-            pbar.write(f"Error processing video {video_id}: {e}")
-
+        if res:
+             results.append(res)
+             
         pbar.update(1)
 
         # Write chunk

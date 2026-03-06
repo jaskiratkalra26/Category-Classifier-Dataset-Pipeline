@@ -2,50 +2,91 @@ import yt_dlp
 import os
 import pandas as pd
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import config
+import logging
 
-def download_videos(metadata_file):
+# Configure basic logging to avoid cluttering console too much
+logging.basicConfig(filename='downloader_errors.log', level=logging.ERROR)
+
+def get_video_path(video_id, category):
+    """Returns the expected path of a video if it exists."""
+    base_dir = os.path.join(config.VIDEOS_DIR, category)
+    if not os.path.exists(base_dir):
+        return None
+        
+    for filename in os.listdir(base_dir):
+        if filename.startswith(video_id + "."):
+            return os.path.join(base_dir, filename)
+            
+    # Fallback checks (slower but safer)
+    for ext in ['.mp4', '.mkv', '.webm']:
+        potential_path = os.path.join(base_dir, f"{video_id}{ext}")
+        if os.path.exists(potential_path):
+            return potential_path
+            
+    return None
+
+def download_video_sync(video_info):
+    """
+    Downloads a single video. Designed to be run in a thread pool.
+    video_info: dict or tuple containing (video_id, category)
+    """
+    video_id = video_info['video_id']
+    category = video_info['category']
+    
+    # Fast check if already exists
+    existing_path = get_video_path(video_id, category)
+    if existing_path:
+        return existing_path
+
+    category_dir = os.path.join(config.VIDEOS_DIR, category)
+    os.makedirs(category_dir, exist_ok=True)
+    
+    url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # Use a fresh options dict for each thread to be safe
+    ydl_opts = {
+        'format': 'best[ext=mp4]/best',
+        'outtmpl': os.path.join(category_dir, '%(id)s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'ignoreerrors': True,
+        # 'download_archive': ... concurrent writing to archive file is risky
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+            
+        # Verify success
+        final_path = get_video_path(video_id, category)
+        return final_path
+    except Exception as e:
+        logging.error(f"Failed to download {video_id}: {e}")
+        return None
+
+def download_videos(metadata_file, max_workers=5):
+    """
+    Parallel version of download_videos.
+    """
     if not os.path.exists(metadata_file):
         print(f"Metadata file {metadata_file} not found.")
         return
 
     df = pd.read_csv(metadata_file)
-    print(f"Loaded {len(df)} videos for downloading.")
+    print(f"Loaded {len(df)} videos. Downloading with {max_workers} threads...")
 
-    # Group by category to manage directories
-    grouped = df.groupby('category')
-
-    for category, group in grouped:
-        category_dir = os.path.join(config.VIDEOS_DIR, category)
-        os.makedirs(category_dir, exist_ok=True)
+    videos_to_process = df.to_dict('records')
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(download_video_sync, vid): vid for vid in videos_to_process}
         
-        print(f"Downloading {len(group)} videos for category: {category}")
-        
-        # Prepare list of URLs and output templates
-        ydl_opts = {
-            # Prefer single file downloads to avoid needing ffmpeg for merging
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': os.path.join(category_dir, '%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'ignoreerrors': True, # Skip individual video errors
-            'download_archive': os.path.join(config.VIDEOS_DIR, 'downloaded.txt'), # Track downloaded files
-        }
-
-        urls = [f"https://www.youtube.com/watch?v={vid}" for vid in group['video_id']]
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # ydl.download handles the list, but for progress bar we might want to iterate manually
-            # However, ydl has its own internal progress. Let's use manual iteration to wrap with tqdm for our own counter
-            
-            pbar = tqdm(total=len(urls), unit="video")
-            for url in urls:
-                try:
-                    ydl.download([url])
-                except Exception as e:
-                    print(f"Failed to download {url}: {e}")
-                pbar.update(1)
-            pbar.close()
+        for future in tqdm(as_completed(futures), total=len(futures), unit="video"):
+            try:
+                result = future.result()
+            except Exception as e:
+                logging.error(f"Thread error: {e}")
 
 if __name__ == "__main__":
     download_videos(config.METADATA_FILE)

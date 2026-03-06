@@ -1,7 +1,7 @@
 import os
 
 # API Configuration
-YOUTUBE_API_KEY = "YOUR_API_KEY_HERE"
+YOUTUBE_API_KEY = "AIzaSyBV5VN40HOWGO9sPUSj3rsESMzRvxs79EQ"
 
 # Ensure directories exist
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
