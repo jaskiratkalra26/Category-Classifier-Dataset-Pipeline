@@ -7,6 +7,14 @@ from frame_sampler import sample_frames
 from clip_embedder import ClipEmbedder
 from PIL import Image
 
+def _mark_failed(video_id):
+    """Marks a video as failed so it's skipped in future runs."""
+    try:
+        with open(config.FAILED_VIDEOS_FILE, "a") as f:
+            f.write(video_id + "\n")
+    except Exception as e:
+        print(f"Warning: Could not write to failed_videos.txt: {e}")
+
 def process_single_video(video_id, category, embedder):
     """
     Processes a single video: extracting frames, generating embedding, returning dict.
@@ -23,25 +31,33 @@ def process_single_video(video_id, category, embedder):
                 break
     
     if not video_path:
+        print(f"[DEBUG] Video path not found for ID: {video_id} in {category_dir}")
+        _mark_failed(video_id)
         return None
 
     try:
         frames = sample_frames(video_path, num_frames=config.FRAME_SAMPLE_COUNT)
         if not frames:
+            print(f"[DEBUG] No frames extracted for {video_id} from {video_path}")
             return None
             
         embedding = embedder.get_embedding(frames)
         
-        if embedding is not None:
-            # Create result dictionary
-            res = {
-                "video_id": video_id,
-                "category": category
-            }
-            # Add embedding fields
-            for i, val in enumerate(embedding):
-                res[f"embedding_{i}"] = val
-            return res
+        if embedding is None:
+            print(f"[DEBUG] Embedding generation returned None for {video_id}")
+            return None
+            
+        print(f"[DEBUG] Success processing {video_id}. Embedding shape: {embedding.shape}")
+        
+        # Create result dictionary
+        res = {
+            "video_id": video_id,
+            "category": category
+        }
+        # Add embedding fields
+        for i, val in enumerate(embedding):
+            res[f"embedding_{i}"] = val
+        return res
 
     except Exception as e:
         print(f"Error processing {video_id}: {e}")
@@ -56,7 +72,7 @@ def build_dataset(metadata_file=config.METADATA_FILE, output_file=config.OUTPUT_
 
     # Load metadata
     try:
-        df = pd.read_csv(metadata_file)
+        df = pd.read_csv(metadata_file, dtype={'video_id': str})
     except Exception as e:
         print(f"Error loading metadata: {e}")
         return
@@ -65,14 +81,28 @@ def build_dataset(metadata_file=config.METADATA_FILE, output_file=config.OUTPUT_
     processed_ids = set()
     if os.path.exists(output_file):
         try:
-            existing_df = pd.read_csv(output_file)
+            # Enforce string type for video_id to ensure matching works correctly
+            existing_df = pd.read_csv(output_file, dtype={'video_id': str})
             processed_ids = set(existing_df['video_id'].unique())
             print(f"Found existing dataset with {len(processed_ids)} processed videos. Resuming...")
         except Exception as e:
-            print(f"Error reading existing dataset, starting fresh: {e}")
+            print(f"Error reading existing dataset (might be empty or corrupted), starting fresh: {e}")
+
+    # Load failed IDs
+    failed_ids = set()
+    if os.path.exists(config.FAILED_VIDEOS_FILE):
+        try:
+            with open(config.FAILED_VIDEOS_FILE, 'r') as f:
+                failed_ids = set(line.strip() for line in f if line.strip())
+            print(f"Found {len(failed_ids)} previously failed videos. Skipping...")
+        except Exception as e:
+            print(f"Error reading failed videos list: {e}")
 
     # Identify videos to process
-    videos_to_process = df[~df['video_id'].isin(processed_ids)]
+    # Ensure strict string comparison
+    df['video_id'] = df['video_id'].astype(str)
+    # Filter out both processed AND failed videos
+    videos_to_process = df[~df['video_id'].isin(processed_ids) & ~df['video_id'].isin(failed_ids)]
 
     if videos_to_process.empty:
         print("All videos in metadata have been processed!")
@@ -85,7 +115,7 @@ def build_dataset(metadata_file=config.METADATA_FILE, output_file=config.OUTPUT_
 
     # Iterate and process
     results = []
-    CHUNK_SIZE = 50 
+    CHUNK_SIZE = 1  # Save after every video to prevent data loss
 
     pbar = tqdm.tqdm(total=len(videos_to_process), unit="video")
     
@@ -94,13 +124,13 @@ def build_dataset(metadata_file=config.METADATA_FILE, output_file=config.OUTPUT_
         
         if res:
              results.append(res)
-             
-        pbar.update(1)
-
-        # Write chunk
+        
+        # Write chunk immediately if we have results
         if len(results) >= CHUNK_SIZE:
              _save_chunk(results, output_file)
              results = []
+             
+        pbar.update(1)
 
     # Save remaining
     if results:

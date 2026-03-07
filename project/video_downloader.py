@@ -75,10 +75,21 @@ def download_videos(metadata_file, max_workers=5):
         return
 
     df = pd.read_csv(metadata_file)
-    print(f"Loaded {len(df)} videos. Downloading with {max_workers} threads...")
-
-    videos_to_process = df.to_dict('records')
     
+    # Load failed IDs
+    failed_ids = set()
+    if os.path.exists(config.FAILED_VIDEOS_FILE):
+        try:
+            with open(config.FAILED_VIDEOS_FILE, 'r') as f:
+                failed_ids = set(line.strip() for line in f if line.strip())
+        except Exception:
+            pass
+
+    # Filter out failed videos
+    videos_to_process = [v for v in df.to_dict('records') if str(v['video_id']) not in failed_ids]
+    
+    print(f"Loaded {len(df)} videos. Skipping {len(df) - len(videos_to_process)} failed. Downloading {len(videos_to_process)} videos with {max_workers} threads...")
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(download_video_sync, vid): vid for vid in videos_to_process}
         

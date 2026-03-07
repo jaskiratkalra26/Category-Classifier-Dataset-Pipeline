@@ -1,7 +1,7 @@
 import os
 
 # API Configuration
-YOUTUBE_API_KEY = "AIzaSyBV5VN40HOWGO9sPUSj3rsESMzRvxs79EQ"
+YOUTUBE_API_KEY = "AIzaSyAbOZqzupJWm_Uxk5ynXBpUg6oimOKMcUk"
 
 # Ensure directories exist
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -10,6 +10,7 @@ VIDEOS_DIR = os.path.join(BASE_DIR, "videos")
 EMBEDDINGS_DIR = os.path.join(BASE_DIR, "embeddings")
 METADATA_FILE = os.path.join(DATASET_DIR, "videos_metadata.csv")
 OUTPUT_DATASET_FILE = os.path.join(DATASET_DIR, "video_embeddings.csv")
+FAILED_VIDEOS_FILE = os.path.join(DATASET_DIR, "failed_videos.txt")
 
 # Create directories if they don't exist
 os.makedirs(DATASET_DIR, exist_ok=True)

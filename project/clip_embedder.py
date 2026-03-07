@@ -28,11 +28,25 @@ class ClipEmbedder:
 
         with torch.no_grad():
             image_features = self.model.get_image_features(**inputs)
-        
-        # Normalize features? CLIP typically returns raw, but often L2 normalized is used.
-        # But here we just get raw -> average -> probably want to normalize the average or just return raw average.
-        # The prompt says "Average the embeddings to produce a single 512-dimensional vector".
-        
+
+        # Robust handling for output type (Tensor vs ModelOutput)
+        if not isinstance(image_features, torch.Tensor):
+            # If it's a HuggingFace ModelOutput, try to get the embeddings
+            if hasattr(image_features, "image_embeds"):
+                image_features = image_features.image_embeds
+            elif hasattr(image_features, "pooler_output"):
+                image_features = image_features.pooler_output
+            elif hasattr(image_features, "last_hidden_state"):
+                 # Should not happen for get_image_features, but as fallback
+                 image_features = image_features.last_hidden_state
+            elif isinstance(image_features, (tuple, list)):
+                image_features = image_features[0]
+                
+        # Final check
+        if not isinstance(image_features, torch.Tensor):
+             print(f"[ERROR] CLIP output is not a tensor: {type(image_features)}")
+             return None
+
         # Averaging embeddings for the video (shape: [num_frames, 512]) -> [1, 512]
         avg_embedding = torch.mean(image_features, dim=0).cpu().numpy()
         
