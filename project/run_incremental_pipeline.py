@@ -24,6 +24,11 @@ def run_incremental():
     api_paused = False
     api_resume_time = 0
 
+    # Track consecutive empty results per category to avoid infinite API hammering
+    consecutive_empty_cycles = {cat: 0 for cat in config.CATEGORIES}
+    stalled_categories = set()
+    MAX_CONSECUTIVE_EMPTY = 3
+
     while True:
         videos_collected_this_cycle = 0
         all_categories_complete = True # Assume complete until proven otherwise
@@ -50,6 +55,10 @@ def run_incremental():
                     df = pd.DataFrame(columns=['video_id', 'title', 'category', 'duration'])
 
                 for category in config.CATEGORIES:
+                    if category in stalled_categories:
+                        print(f"Skipping stalled category '{category}' (search exhausted).")
+                        continue
+
                     if 'category' in df.columns:
                         current_count = len(df[df['category'] == category])
                     else:
@@ -87,8 +96,13 @@ def run_incremental():
                             # Update local df for next iteration in loop
                             df = pd.concat([df, new_df], ignore_index=True)
                             print(f"Saved {len(new_videos)} videos for {category}.")
+                            consecutive_empty_cycles[category] = 0 # Reset counter on success
                         else:
                             print(f"No videos found for {category} in this attempt.")
+                            consecutive_empty_cycles[category] += 1
+                            if consecutive_empty_cycles[category] >= MAX_CONSECUTIVE_EMPTY:
+                                print(f"WARNING: Category '{category}' has returned no videos for {MAX_CONSECUTIVE_EMPTY} consecutive cycles. Marking as stalled.")
+                                stalled_categories.add(category)
                             
                     except HttpError as e:
                         if e.resp.status in [403, 429]:

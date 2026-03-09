@@ -1,6 +1,7 @@
 import pandas as pd
 import time
 import os
+import json
 import config
 # Try importing tqdm, fall back to simple range if missing
 try:
@@ -13,13 +14,32 @@ from googleapiclient.errors import HttpError
 import isodate
 
 class YouTubeCollector: 
-    def __init__(self, api_key=None): 
+    def __init__(self, api_key=None, tokens_file="search_tokens.json"):
         # Check if API key is in config if not passed
         self.api_key = api_key if api_key else config.YOUTUBE_API_KEY
+        self.tokens_file = tokens_file
+        self.tokens = self._load_tokens()
+        
         if not self.api_key or self.api_key == "YOUR_API_KEY_HERE":
             print("Warning: API Key not set properly.")
         else:
             self.youtube = build('youtube', 'v3', developerKey=self.api_key)
+
+    def _load_tokens(self):
+        if os.path.exists(self.tokens_file):
+            try:
+                with open(self.tokens_file, 'r') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+    def _save_tokens(self):
+        try:
+            with open(self.tokens_file, 'w') as f:
+                json.dump(self.tokens, f)
+        except Exception as e:
+            print(f"Failed to save tokens: {e}")
 
     def _get_video_durations(self, video_ids):
         """
@@ -63,7 +83,8 @@ class YouTubeCollector:
         query_term = config.SEARCH_QUERIES.get(category, category)
         print(f"\n[Search] Collecting videos for '{category}' (Query: '{query_term}') using API...")
         
-        next_page_token = None
+        # Load the next page token if available
+        next_page_token = self.tokens.get(category)
         consecutive_errors = 0
         
         # We request 'short' videos (<4 mins) to increase hit rate for 10-60s target
@@ -128,6 +149,11 @@ class YouTubeCollector:
                         break
                 
                 print(f"  Collected {len(videos)}/{max_needed} valid videos so far...")
+                
+                
+                # Update and save the token
+                self.tokens[category] = next_page_token
+                self._save_tokens()
                 
                 next_page_token = search_response.get("nextPageToken")
                 if not next_page_token:

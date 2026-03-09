@@ -1,10 +1,8 @@
 __pycache__/
 *.pyc
 .venv/
-project/videos/
-project/dataset/
-project/embeddings/
 project/test_output/
 project/test_parallel_output/
 *.mp4
 .DS_Store
+*.part
