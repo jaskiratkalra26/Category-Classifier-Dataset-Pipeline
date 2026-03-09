@@ -63,34 +63,48 @@ def search_and_download_video(row, output_dir):
         'no_warnings': True,
         'max_filesize': 50 * 1024 * 1024, # 50MB limit
         'match_filter': yt_dlp.utils.match_filter_func("duration > 10 & duration < 60"),
-        'default_search': 'ytsearch1',
         'ignoreerrors': True,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # We search and download in one go
-            # This might be slow if we search many times
-            # Note: yt-dlp search returns a playlist-like object
-            info = ydl.extract_info(f"ytsearch1:{search_query}", download=True)
-            
-            if 'entries' in info:
-                video_info = info['entries'][0]
-            else:
-                video_info = info
+            # 1. Search first (no download) to get ID
+            try:
+                # Use ytsearch1 to get metadata first
+                result = ydl.extract_info(f"ytsearch1:{search_query}", download=False)
+            except Exception:
+                return None
 
-            if not video_info:
+            if not result:
                 return None
                 
+            if 'entries' in result:
+                if not result['entries']:
+                    return None
+                video_info = result['entries'][0]
+            else:
+                video_info = result
+                
             video_id = video_info.get('id')
-            ext = video_info.get('ext', 'mp4')
-            path = os.path.join(output_dir, f"{video_id}.{ext}")
+            if not video_id:
+                return None
+                
+            # 2. Check if exists
+            base_path = os.path.join(output_dir, video_id)
+            for ext in ['.mp4', '.mkv', '.webm']:
+                if os.path.exists(base_path + ext):
+                    return base_path + ext
             
-            if os.path.exists(path):
-                return path
+            # 3. Download by URL (safer than search string)
+            video_url = video_info.get('webpage_url') or f"https://www.youtube.com/watch?v={video_id}"
+            ydl.download([video_url])
             
-    except Exception as e:
-        # print(f"Error downloading {search_query}: {e}")
+            # 4. Verify download
+            for ext in ['.mp4', '.mkv', '.webm']:
+                if os.path.exists(base_path + ext):
+                    return base_path + ext
+            
+    except Exception:
         return None
         
     return None
