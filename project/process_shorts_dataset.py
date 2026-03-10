@@ -2,9 +2,13 @@ import pandas as pd
 import os
 import tqdm
 import sys
+import time
+import random
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 import yt_dlp
 import numpy as np
+import traceback
 
 # Ensure project root is in path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -42,116 +46,212 @@ CATEGORY_MAP = {
     # Add others if needed
 }
 
-def search_and_download_video(row, output_dir):
+def process_category_batch(category, target_count, output_dir, embedder, results_list, output_path, known_ids):
     """
-    Searches for a video on YouTube using title and author, and downloads it.
-    Returns the path to the downloaded file or None.
+    Process a single category by performing a BATCH search and processing results.
+    Returns the number of successfully processed videos.
     """
-    title = row['title']
-    author = row['author_handle']
-    search_query = f"{title} {author}"
+    # print(f"\nProcessing category: {category}")
+    cat_dir = os.path.join(config.VIDEOS_DIR, category)
+    os.makedirs(cat_dir, exist_ok=True)
     
-    # Clean search query
-    search_query = "".join([c if c.isalnum() or c.isspace() else "" for c in search_query])
+    # Try multiple search variations to find enough videos
+    search_queries = [
+        f"{category} shorts",
+        f"best {category} shorts",
+        f"viral {category} shorts",
+        f"new {category} shorts",
+        f"{category} compilation shorts",
+        f"top {category} shorts",
+        f"trending {category} shorts",
+        f"funny {category} moments",
+        f"{category} 2024",
+        f"{category} 2025",
+    ]
+
+    # Add specific queries for hard-to-fill categories
+    if category.lower() == "gaming":
+        search_queries.extend([
+            "minecraft shorts", "roblox shorts", "fortnite shorts", 
+            "gta 5 shorts", "valorant shorts", "call of duty shorts",
+            "gaming memes", "league of legends shorts", "among us shorts"
+        ])
+    elif category.lower() == "news":
+        search_queries.extend(["breaking news shorts", "world news shorts", "daily news shorts", "politics shorts"])
+    elif category.lower() == "cooking":
+        search_queries.extend(["easy recipes shorts", "street food shorts", "food hacks shorts", "baking shorts"])
+    elif category.lower() == "sports":
+        search_queries.extend(["nba shorts", "football shorts", "soccer shorts", "ufc shorts", "cricket shorts", "gymnastics shorts"])
+    elif category.lower() == "technology":
+        search_queries.extend(["tech reviews shorts", "new gadgets shorts", "pc build shorts", "smartphone review shorts", "future tech shorts", "coding shorts"])
+    elif category.lower() == "finance":
+        search_queries.extend(["investing tips shorts", "stock market shorts", "crypto news shorts", "passive income shorts", "money saving tips shorts"])
+    elif category.lower() == "fitness":
+        search_queries.extend(["workout routine shorts", "gym motivation shorts", "calisthenics shorts", "yoga shorts", "weight loss tips shorts"])
+    elif category.lower() == "travel":
+        search_queries.extend(["travel guide shorts", "beautiful places shorts", "luxury travel shorts", "solo travel shorts", "backpacking shorts"])
+    elif category.lower() == "music":
+        search_queries.extend(["live concert shorts", "music cover shorts", "guitar solo shorts", "piano shorts", "rap freestyle shorts", "singer shorts"])
+    elif category.lower() == "comedy":
+        search_queries.extend(["skit shorts", "stand up comedy shorts", "prank shorts", "relatable shorts", "funny animals shorts"])
+    elif category.lower() == "beauty":
+        search_queries.extend(["makeup tutorial shorts", "skincare routine shorts", "fashion trends shorts", "hair styling shorts", "outfit ideas shorts"])
+    elif category.lower() == "education":
+        search_queries.extend(["science facts shorts", "history facts shorts", "learn english shorts", "math hacks shorts", "psychology facts shorts", "did you know shorts"])
     
-    # Configure yt-dlp
-    ydl_opts = {
-        'format': 'best[ext=mp4]/best',
-        'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
-        'noplaylist': True,
-        'quiet': True,
-        'no_warnings': True,
-        'max_filesize': 50 * 1024 * 1024, # 50MB limit
-        'match_filter': yt_dlp.utils.match_filter_func("duration > 10 & duration < 60"),
-        'ignoreerrors': True,
-    }
+    total_processed_for_category = 0
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 1. Search first (no download) to get ID
-            try:
-                # Use ytsearch1 to get metadata first
-                result = ydl.extract_info(f"ytsearch1:{search_query}", download=False)
-            except Exception:
-                return None
-
-            if not result:
-                return None
-                
-            if 'entries' in result:
-                if not result['entries']:
-                    return None
-                video_info = result['entries'][0]
-            else:
-                video_info = result
-                
-            video_id = video_info.get('id')
-            if not video_id:
-                return None
-                
-            # 2. Check if exists
-            base_path = os.path.join(output_dir, video_id)
-            for ext in ['.mp4', '.mkv', '.webm']:
-                if os.path.exists(base_path + ext):
-                    return base_path + ext
-            
-            # 3. Download by URL (safer than search string)
-            video_url = video_info.get('webpage_url') or f"https://www.youtube.com/watch?v={video_id}"
-            ydl.download([video_url])
-            
-            # 4. Verify download
-            for ext in ['.mp4', '.mkv', '.webm']:
-                if os.path.exists(base_path + ext):
-                    return base_path + ext
-            
-    except Exception:
-        return None
+    for idx, search_query in enumerate(search_queries):
+        # Check how many we already have for this category in the current session
+        current_count = sum(1 for r in results_list if r['category'] == category)
+        needed = target_count - current_count
         
-    return None
+        if needed <= 0:
+            break
+
+        # Search for more candidates than needed
+        # Ensure we ask for enough to cover failures
+        search_limit = int(needed * 3) + 20
+        
+        # Hard cap to prevent extreme queries, but must be at least needed + buffer
+        if search_limit > 500: search_limit = 500
+        if search_limit < 50: search_limit = 50
+        
+        # print(f"Searching for up to {search_limit} candidates for '{search_query}'...")
+
+        ydl_opts = {
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': os.path.join(cat_dir, '%(id)s.%(ext)s'),
+            'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+            'max_filesize': 50 * 1024 * 1024,
+            'match_filter': yt_dlp.utils.match_filter_func("duration >= 5 & duration <= 65"),
+            'ignoreerrors': True,
+            'socket_timeout': 30,
+            'retries': 10,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                # 1. BATCH SEARCH
+                try:
+                    result = ydl.extract_info(f"ytsearch{search_limit}:{search_query}", download=False)
+                except Exception as e:
+                    print(f"Search failed for '{search_query}': {e}")
+                    continue
+
+                if not result:
+                    continue
+                    
+                entries = result.get('entries', [])
+                if not entries:
+                    continue
+                
+                entries = list(entries)
+
+                # 2. Iterate and Process
+                processed_in_query = 0
+                for video_info in entries:
+                    if sum(1 for r in results_list if r['category'] == category) >= target_count:
+                        break
+                        
+                    if not video_info: continue
+                    video_id = video_info.get('id')
+                    if not video_id: continue
+                    
+                    # Check if this ID is already in our results
+                    if video_id in known_ids or any(r['video_id'] == video_id for r in results_list):
+                        continue
+
+                    # Prepare download path
+                    video_path = None
+                    base_path = os.path.join(cat_dir, video_id)
+                    
+                    # Check if file exists
+                    for ext in ['.mp4', '.mkv', '.webm']:
+                         if os.path.exists(base_path + ext):
+                             video_path = base_path + ext
+                             break
+                    
+                    # Download if not exists
+                    if not video_path:
+                        try:
+                            ydl.download([video_info.get('webpage_url', f'https://youtu.be/{video_id}')])
+                            for ext in ['.mp4', '.mkv', '.webm']:
+                                if os.path.exists(base_path + ext):
+                                    video_path = base_path + ext
+                                    break
+                            time.sleep(random.uniform(2, 5))
+                        except Exception as e:
+                            print(f"Download failed for {video_id}: {e}")
+                            time.sleep(5)
+                            continue
+                    
+                    if not video_path:
+                        continue
+
+                    # Sample Frames
+                    try:
+                        frames = sample_frames(video_path, num_frames=config.FRAME_SAMPLE_COUNT)
+                    except Exception as e:
+                        print(f"Frame error {video_id} (deleting): {e}")
+                        try: os.remove(video_path) 
+                        except: pass
+                        continue
+                        
+                    if not frames:
+                        print(f"No frames from {video_id} (deleting)")
+                        try: os.remove(video_path) 
+                        except: pass
+                        continue
+
+                    # Embed
+                    try:
+                        embedding = embedder.get_embedding(frames)
+                    except Exception as e:
+                         print(f"Embed error {video_id}: {e}")
+                         continue
+
+                    if embedding is None:
+                        continue
+
+                    # Add to results
+                    res = {
+                        "video_id": video_id,
+                        "category": category,
+                        "original_title": video_info.get('title', 'Unknown'),
+                        "dataset_title": f"SEARCH_{category}", 
+                        "original_author": video_info.get('uploader', 'Unknown')
+                    }
+                    for i, val in enumerate(embedding):
+                        res[f"embedding_{i}"] = val
+                    
+                    results_list.append(res)
+                    total_processed_for_category += 1
+                    processed_in_query += 1
+                    
+                    # Update known_ids so duplicates within session (diff queries) are caught
+                    known_ids.add(video_id)
+                    
+                    # Checkpoint save
+                    if len(results_list) % 5 == 0:
+                        pd.DataFrame(results_list).to_csv(output_path, index=False)
+        
+        except Exception as e:
+            print(f"Error processing query '{search_query}': {e}")
+            traceback.print_exc()
+
+    return total_processed_for_category
 
 def main():
-    print("Loading youtube_shorts_tiktok_trends_2025.csv...")
-    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'youtube_shorts_tiktok_trends_2025.csv')
+    print("Starting optimized dataset collection (Batch Search Mode)...")
     
-    if not os.path.exists(csv_path):
-        print(f"File not found: {csv_path}")
-        return
-        
-    df = pd.read_csv(csv_path)
-    
-    # Filter Platform
-    print("Filtering for YouTube platform...")
-    df = df[df['platform'].str.lower() == 'youtube']
-    
-    # Filter Duration
-    print("Filtering duration 10-60s...")
-    df = df[(df['duration_sec'] >= 10) & (df['duration_sec'] <= 60)]
-    
-    # Map Categories
-    print("Mapping categories...")
-    df['mapped_category'] = df['category'].map(CATEGORY_MAP)
-    df = df.dropna(subset=['mapped_category'])
-    
-    # Filter Targets
-    df = df[df['mapped_category'].isin(TARGET_CATEGORIES)]
-    
-    # Equalize
-    counts = df['mapped_category'].value_counts()
-    print("Counts available per category:")
-    print(counts)
-    
-    if counts.empty:
-        print("No videos found.")
-        return
-
-    # User asked for "equal records". Since we rely on search which is slow/uncertain,
-    # let's cap at a reasonable number for a test run, e.g., 20.
-    # If the user wants ALL 800+, they can increase this limit.
-    # Given "a 1.5 gb video is being dowloaded" complaint, smaller batches are better to start.
-    target_count = 20
-    print(f"Equalizing to {target_count} records per category for processing...")
-    
-    sampled_df = df.groupby('mapped_category').sample(n=target_count, replace=False, random_state=42)
+    # Parse CLI arguments
+    parser = argparse.ArgumentParser(description="Download and process shorts dataset.")
+    parser.add_argument("--count", type=int, default=50, help="Target number of videos per category (default: 50)")
+    parser.add_argument("--category", type=str, help="Specific category to process (optional)")
+    args = parser.parse_args()
     
     # Initialize Embedder
     print("Initializing ClipEmbedder...")
@@ -163,65 +263,66 @@ def main():
 
     # Output file
     output_path = config.OUTPUT_DATASET_FILE
-    if os.path.exists(output_path):
-        # Backup old one
-        os.rename(output_path, output_path + ".bak")
-        
+    
     results = []
-    
-    print("Processing videos (Search -> Download -> Embed)...")
-    
-    # We process sequentially or parallel?
-    # Search is network bound. Embedding is CPU/GPU bound.
-    # Let's do sequential to avoid "1.5 gb" parallel surprises and easier debugging.
-    
-    failed_downloads = 0
-    
-    for idx, row in tqdm.tqdm(sampled_df.iterrows(), total=len(sampled_df)):
-        category = row['mapped_category']
-        cat_dir = os.path.join(config.VIDEOS_DIR, category)
-        os.makedirs(cat_dir, exist_ok=True)
-        
-        # Download
-        video_path = search_and_download_video(row, cat_dir)
-        
-        if not video_path:
-            failed_downloads += 1
-            continue
-            
-        # Extract Frames
-        frames = sample_frames(video_path, num_frames=config.FRAME_SAMPLE_COUNT)
-        if not frames:
-            continue
-            
-        # Embed
-        embedding = embedder.get_embedding(frames)
-        if embedding is None:
-            continue
-            
-        # Store
-        res = {
-            "video_id": os.path.basename(video_path).split('.')[0], # Use filename as ID since we don't have original ID
-            "category": category,
-            "original_title": row['title'],
-            "original_author": row['author_handle']
-        }
-        for i, val in enumerate(embedding):
-            res[f"embedding_{i}"] = val
-            
-        results.append(res)
-        
-        # Save incrementally
-        if len(results) % 10 == 0:
-            pd.DataFrame(results).to_csv(output_path, index=False)
-
-    # Final Save
-    if results:
-        pd.DataFrame(results).to_csv(output_path, index=False)
-        print(f"Done. Saved {len(results)} records to {output_path}.")
-        print(f"Failed downloads: {failed_downloads}")
+    if os.path.exists(output_path):
+        try:
+            print(f"Resuming from existing file: {output_path}")
+            # Ensure video_id is read as string
+            df_existing = pd.read_csv(output_path, dtype={'video_id': str})
+            results = df_existing.to_dict('records')
+            print(f"Loaded {len(results)} existing records.")
+        except Exception as e:
+            print(f"Error reading existing file: {e}. Starting fresh.")
+            # If read fails, maybe backup
+            backup_path = output_path + ".corrupt"
+            try:
+                os.rename(output_path, backup_path)
+                print(f"Backed up corrupt file to {backup_path}")
+            except: pass
     else:
-        print("No results generated.")
+        print("Starting fresh dataset.")
+    
+    # Target count per category (from CLI or default)
+    target_count = args.count 
+    print(f"Targeting {target_count} videos per category. Filling gaps in existing dataset...")
+    
+    total_processed = 0
+    
+    # Pre-compute set of known IDs to avoid re-processing ANY video
+    known_video_ids = set(r['video_id'] for r in results if 'video_id' in r)
+    print(f"Tracking {len(known_video_ids)} unique video IDs to skip.")
+    
+    # Determine categories to process
+    categories_to_process = TARGET_CATEGORIES
+    if args.category:
+        if args.category in TARGET_CATEGORIES:
+            categories_to_process = [args.category]
+            print(f"Filtering for single category: {args.category}")
+        else:
+            print(f"Warning: Category '{args.category}' not in standard list. Processing anyway.")
+            categories_to_process = [args.category]
+
+    try:
+        # Iterate over CATEGORIES directly with progress bar
+        pbar = tqdm.tqdm(categories_to_process)
+        for category in pbar:
+            pbar.set_description(f"Processing {category}")
+            count = process_category_batch(category, target_count, config.VIDEOS_DIR, embedder, results, output_path, known_video_ids)
+            total_processed += count
+            # print(f"Finished {category}: Added {count} videos.")
+
+    except KeyboardInterrupt:
+        print("\nProcess interrupted by user.")
+    except Exception as e:
+        print(f"\nCRITICAL ERROR in main loop: {e}")
+        traceback.print_exc()
+    finally:
+        # Final Save
+        if results:
+            print(f"Saving {len(results)} total records to {output_path}")
+            pd.DataFrame(results).to_csv(output_path, index=False)
+        print("Done.")
 
 if __name__ == "__main__":
     main()
